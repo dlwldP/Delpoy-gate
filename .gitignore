@@ -12,6 +12,8 @@ target/
 ### Spring Boot ###
 HELP.md
 *.jar
+!gradle/wrapper/gradle-wrapper.jar
+!.mvn/wrapper/maven-wrapper.jar
 *.war
 *.log
 application-local.yml
