@@ -2,10 +2,14 @@
 #
 # Demonstrates how a CI/CD pipeline calls deploy-gate's POST /approval/check
 # right before `cdk deploy`. This workflow builds and boots the real
-# deploy-gate app, then exercises both branches of the approval decision
-# using the seeded demo data (see config/DemoDataSeeder):
-#   - jiye -> SmallAppStack: has the required claim, approvalLevel=NONE -> 200 OK
-#   - jiye -> ProdAlbStack: approvalLevel=DUAL_APPROVER (no approval flow yet) -> 403 Forbidden
+# deploy-gate app, then exercises all three approval paths using the seeded
+# demo data (see config/DemoDataSeeder):
+#   - jiye -> SmallAppStack: approvalLevel=NONE, has the required claim -> 200 OK
+#   - jiye -> StagingApiStack: approvalLevel=SINGLE_APPROVER -> 202 Pending,
+#     then alice approves -> 200 OK
+#   - jiye -> ProdAlbStack: approvalLevel=DUAL_APPROVER -> 202 Pending,
+#     stays pending after one of two approvals, then 200 OK once both
+#     alice and bob (distinct approvers) approve
 name: Deploy Example (deploy-gate integration demo)
 
 on:
@@ -42,7 +46,7 @@ jobs:
           cat app.log
           exit 1
 
-      - name: cdk deploy step (SmallAppStack) -- expect approval
+      - name: cdk deploy step (SmallAppStack) -- expect immediate approval
         run: |
           STATUS=$(curl -s -o response.json -w '%{http_code}' -X POST http://localhost:8080/approval/check \
             -H 'Content-Type: application/json' \
@@ -54,17 +58,99 @@ jobs:
           fi
           echo "approved -> cdk deploy SmallAppStack (example, not actually run)"
 
-      - name: cdk deploy step (ProdAlbStack) -- expect block
+      - name: cdk deploy step (StagingApiStack) -- single-approver flow
+        run: |
+          STATUS=$(curl -s -o response.json -w '%{http_code}' -X POST http://localhost:8080/approval/check \
+            -H 'Content-Type: application/json' \
+            -d '{"user":"jiye","stack":"StagingApiStack","action":"DEPLOY"}')
+          echo "check response: $(cat response.json)"
+          if [ "$STATUS" != "202" ]; then
+            echo "expected 202 Pending for StagingApiStack but got $STATUS"
+            exit 1
+          fi
+
+          curl -s -o request.json -X POST http://localhost:8080/approval/request \
+            -H 'Content-Type: application/json' \
+            -d '{"user":"jiye","stack":"StagingApiStack","action":"DEPLOY"}'
+          echo "request response: $(cat request.json)"
+          REQUEST_ID=$(jq -r '.id' request.json)
+
+          STATUS=$(curl -s -o approve.json -w '%{http_code}' -X POST "http://localhost:8080/approval/$REQUEST_ID/approve" \
+            -H 'Content-Type: application/json' \
+            -d '{"approver":"alice"}')
+          echo "approve response: $(cat approve.json)"
+          if [ "$STATUS" != "200" ] || [ "$(jq -r '.status' approve.json)" != "APPROVED" ]; then
+            echo "expected a single alice approval to fully approve StagingApiStack's request"
+            exit 1
+          fi
+
+          STATUS=$(curl -s -o response.json -w '%{http_code}' -X POST http://localhost:8080/approval/check \
+            -H 'Content-Type: application/json' \
+            -d '{"user":"jiye","stack":"StagingApiStack","action":"DEPLOY"}')
+          echo "recheck response: $(cat response.json)"
+          if [ "$STATUS" != "200" ]; then
+            echo "expected 200 OK for StagingApiStack after approval but got $STATUS"
+            exit 1
+          fi
+          echo "approved -> cdk deploy StagingApiStack (example, not actually run)"
+
+      - name: cdk deploy step (ProdAlbStack) -- dual-approver flow
         run: |
           STATUS=$(curl -s -o response.json -w '%{http_code}' -X POST http://localhost:8080/approval/check \
             -H 'Content-Type: application/json' \
             -d '{"user":"jiye","stack":"ProdAlbStack","action":"DEPLOY"}')
-          echo "response: $(cat response.json)"
-          if [ "$STATUS" != "403" ]; then
-            echo "expected 403 Forbidden for ProdAlbStack but got $STATUS"
+          echo "check response: $(cat response.json)"
+          if [ "$STATUS" != "202" ]; then
+            echo "expected 202 Pending for ProdAlbStack but got $STATUS"
             exit 1
           fi
-          echo "blocked -> cdk deploy ProdAlbStack aborted (expected)"
+
+          curl -s -o request.json -X POST http://localhost:8080/approval/request \
+            -H 'Content-Type: application/json' \
+            -d '{"user":"jiye","stack":"ProdAlbStack","action":"DEPLOY"}'
+          echo "request response: $(cat request.json)"
+          REQUEST_ID=$(jq -r '.id' request.json)
+
+          curl -s -o approve1.json -X POST "http://localhost:8080/approval/$REQUEST_ID/approve" \
+            -H 'Content-Type: application/json' \
+            -d '{"approver":"alice"}'
+          echo "alice approve response: $(cat approve1.json)"
+          if [ "$(jq -r '.status' approve1.json)" != "PENDING" ]; then
+            echo "expected ProdAlbStack request to still be PENDING after only one of two approvals"
+            exit 1
+          fi
+
+          STATUS=$(curl -s -o response.json -w '%{http_code}' -X POST http://localhost:8080/approval/check \
+            -H 'Content-Type: application/json' \
+            -d '{"user":"jiye","stack":"ProdAlbStack","action":"DEPLOY"}')
+          echo "recheck after 1/2 response: $(cat response.json)"
+          if [ "$STATUS" != "202" ]; then
+            echo "expected 202 Pending for ProdAlbStack after only one approval but got $STATUS"
+            exit 1
+          fi
+
+          STATUS=$(curl -s -o approve2.json -w '%{http_code}' -X POST "http://localhost:8080/approval/$REQUEST_ID/approve" \
+            -H 'Content-Type: application/json' \
+            -d '{"approver":"bob"}')
+          echo "bob approve response: $(cat approve2.json)"
+          if [ "$STATUS" != "200" ] || [ "$(jq -r '.status' approve2.json)" != "APPROVED" ]; then
+            echo "expected a second, distinct approval (bob) to fully approve ProdAlbStack's request"
+            exit 1
+          fi
+
+          STATUS=$(curl -s -o response.json -w '%{http_code}' -X POST http://localhost:8080/approval/check \
+            -H 'Content-Type: application/json' \
+            -d '{"user":"jiye","stack":"ProdAlbStack","action":"DEPLOY"}')
+          echo "recheck response: $(cat response.json)"
+          if [ "$STATUS" != "200" ]; then
+            echo "expected 200 OK for ProdAlbStack after both approvals but got $STATUS"
+            exit 1
+          fi
+          echo "approved -> cdk deploy ProdAlbStack (example, not actually run)"
+
+      - name: Show approval history
+        if: always()
+        run: curl -s "http://localhost:8080/approval/history" | jq .
 
       - name: Show app log
         if: always()

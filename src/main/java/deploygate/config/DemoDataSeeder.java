@@ -25,13 +25,35 @@ public class DemoDataSeeder implements CommandLineRunner {
     public void run(String... args) {
         deployerRepository.save(Deployer.builder()
                 .name("jiye")
-                .claims(Set.of("stack:SmallAppStack:deploy", "stack:SmallAppStack:destroy"))
+                .claims(Set.of(
+                        "stack:SmallAppStack:deploy",
+                        "stack:SmallAppStack:destroy",
+                        "stack:ProdAlbStack:deploy",
+                        "stack:StagingApiStack:deploy"))
+                .build());
+
+        deployerRepository.save(Deployer.builder()
+                .name("alice")
+                .claims(Set.of(
+                        "stack:ProdAlbStack:approve",
+                        "stack:StagingApiStack:approve"))
+                .build());
+
+        deployerRepository.save(Deployer.builder()
+                .name("bob")
+                .claims(Set.of("stack:ProdAlbStack:approve"))
                 .build());
 
         stackPolicyRepository.save(StackPolicy.builder()
                 .stackName("SmallAppStack")
                 .requiredClaim("stack:SmallAppStack:deploy")
                 .approvalLevel(ApprovalLevel.NONE)
+                .build());
+
+        stackPolicyRepository.save(StackPolicy.builder()
+                .stackName("StagingApiStack")
+                .requiredClaim("stack:StagingApiStack:deploy")
+                .approvalLevel(ApprovalLevel.SINGLE_APPROVER)
                 .build());
 
         stackPolicyRepository.save(StackPolicy.builder()
