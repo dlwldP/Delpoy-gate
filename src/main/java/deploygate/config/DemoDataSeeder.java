@@ -23,6 +23,10 @@ public class DemoDataSeeder implements CommandLineRunner {
 
     @Override
     public void run(String... args) {
+        if (deployerRepository.count() > 0) {
+            return;
+        }
+
         deployerRepository.save(Deployer.builder()
                 .name("jiye")
                 .claims(Set.of(

@@ -14,8 +14,10 @@ import deploygate.policy.ApprovalPolicyResolver;
 import deploygate.policy.ApprovalResult;
 import deploygate.policy.Decision;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 @Service
+@Transactional
 public class ApprovalCheckService {
 
     private final DeployerRepository deployerRepository;

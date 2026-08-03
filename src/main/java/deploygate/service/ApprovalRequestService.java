@@ -30,12 +30,14 @@ import deploygate.validation.StackNotFoundException;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
 @Service
+@Transactional
 public class ApprovalRequestService {
 
     private final DeployerRepository deployerRepository;
@@ -160,6 +162,7 @@ public class ApprovalRequestService {
         return new ApprovalActionResponse(requestId, request.getStatus().name(), "rejected by " + approverName);
     }
 
+    @Transactional(readOnly = true)
     public List<ApprovalHistoryEntry> history(Optional<String> stack, Optional<String> user, int limit) {
         Pageable pageable = PageRequest.of(0, Math.min(Math.max(limit, 1), 200));
         List<ApprovalLog> logs;

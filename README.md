@@ -89,8 +89,8 @@ public class DualApproverPolicy extends ApprovalPolicy { /* 승인권자 2인 �
 | 인가 모델 | Claims 기반 (InfraHub 패턴 재사용) |
 | 인프라 대상 | AWS CDK (Java) 로 정의된 스택 |
 | 파이프라인 연동 | GitHub Actions |
-| 헬스체크 | Spring Boot Actuator |
-| DB | (검토 중 — 소규모 정책 테이블이라 PostgreSQL 또는 SQLite로 시작 가능) |
+| 헬스체크/모니터링 | Spring Boot Actuator (health, info, metrics) |
+| DB | SQLite (파일 기반 영속화, 별도 DB 서버 없이 단일 인스턴스로 운영) |
 
 ## 프로젝트 구조 (예정)
 
@@ -109,20 +109,20 @@ deploy-gate/
 
 🚧 초기 설계 단계
 
-### P1 — MVP 핵심
+### P1 — MVP 핵심 ✅
 - `deployer` / `stack_policy` 데이터 모델 및 claim 매칭 로직
 - `POST /approval/check` — 승인 없이 claim 매칭만으로 허용/거부 판단 (`NoApprovalPolicy`만 지원)
 - GitHub Actions 연동 예시 워크플로우 (`cdk deploy` 전 호출)
 
-### P2 — 2차
+### P2 — 2차 ✅
 - `SingleApproverPolicy`, `DualApproverPolicy` 등 승인 레벨 확장
 - `POST /approval/request` + `approve`/`reject` 승인 대기 흐름
 - `approval_log` 감사 로그 및 `GET /approval/history` 조회 API
 
 ### P3 — 확장
-- Actuator 기반 헬스체크 및 운영 모니터링 연동
-- 정책 테이블을 코드 변경 없이 관리할 수 있는 간단한 관리 화면(옵션)
-- 다른 CDK 스택/멀티 프로젝트로 확장 가능한 범용 라이브러리화 검토
+- ✅ Actuator 기반 헬스체크 및 운영 모니터링 연동 (health/info/metrics), SQLite 영속화
+- 정책 테이블을 코드 변경 없이 관리할 수 있는 간단한 관리 화면(옵션) — 보류
+- 다른 CDK 스택/멀티 프로젝트로 확장 가능한 범용 라이브러리화 검토 — 보류
 
 ## 왜 이 프로젝트인가
 
