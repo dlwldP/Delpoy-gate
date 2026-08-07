@@ -199,6 +199,11 @@ public class ApprovalRequestService {
         if (!approver.getClaims().contains(requiredClaim)) {
             throw new ApproverNotAuthorizedException(approverName + " is missing required claim: " + requiredClaim);
         }
+        // Four-eyes principle: the deploy would otherwise be self-authorized, which
+        // defeats the point of requiring an approver at all.
+        if (approver.getId().equals(request.getDeployerId())) {
+            throw new ApproverNotAuthorizedException("a deployer cannot approve or reject their own request");
+        }
         return approver;
     }
 

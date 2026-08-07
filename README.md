@@ -87,15 +87,32 @@ public class DualApproverPolicy extends ApprovalPolicy { /* claim 확인 후 승
 
 ## API
 
-| 엔드포인트 | 설명 |
-|---|---|
-| `POST /approval/check` | 즉시 판단 필요 시 호출 (CI 파이프라인에서 사용) |
-| `POST /approval/request` | 승인 레벨이 높은 스택은 즉시 거부 대신 승인 대기 상태 생성 |
-| `POST /approval/{id}/approve` | 승인권자가 대기 중인 요청 승인 |
-| `POST /approval/{id}/reject` | 승인권자가 대기 중인 요청 거부 |
-| `GET /approval/history` | 감사 로그 조회 (누가 언제 무엇을 승인/거부했는지) |
-| `GET /admin/deployers` | 등록된 deployer와 보유 claim 조회 (관리 화면용, 읽기 전용) |
-| `GET /admin/stack-policies` | 스택별 정책(필요 claim, 승인 레벨) 조회 (관리 화면용, 읽기 전용) |
+모든 엔드포인트는 `Authorization: Bearer <token>` 인증이 필요합니다 (헬스체크 제외).
+
+| 엔드포인트 | 설명 | 필요 권한 |
+|---|---|---|
+| `POST /approval/check` | 즉시 판단 필요 시 호출 (CI 파이프라인에서 사용) | CI 서비스 토큰 또는 본인 토큰 |
+| `POST /approval/request` | 승인 레벨이 높은 스택은 즉시 거부 대신 승인 대기 상태 생성 | CI 서비스 토큰 또는 본인 토큰 |
+| `POST /approval/{id}/approve` | 승인권자가 대기 중인 요청 승인 | **개인 토큰만** + `stack:{stack}:approve` |
+| `POST /approval/{id}/reject` | 승인권자가 대기 중인 요청 거부 | **개인 토큰만** + `stack:{stack}:approve` |
+| `GET /approval/history` | 감사 로그 조회 (누가 언제 무엇을 승인/거부했는지) | `admin:read` |
+| `GET /admin/deployers` | 등록된 deployer와 보유 claim 조회 (관리 화면용, 읽기 전용) | `admin:read` |
+| `GET /admin/stack-policies` | 스택별 정책(필요 claim, 승인 레벨) 조회 (관리 화면용, 읽기 전용) | `admin:read` |
+
+### 인증 모델
+
+승인/거부의 **신원은 요청 본문이 아니라 토큰에서 도출**합니다. `approve`/`reject`는 본문이 없고,
+누가 승인했는지는 오직 토큰으로만 결정됩니다 — 그렇지 않으면 아무 토큰이나 가진 사람이
+`{"approver":"alice"}`로 남의 이름을 사칭할 수 있습니다.
+
+| 토큰 종류 | 발급 대상 | 할 수 있는 일 |
+|---|---|---|
+| 개인 토큰 (`deployer.api_token_hash`) | 사람 | 본인 명의의 check/request, 승인·거부 |
+| CI 서비스 토큰 (`deploygate.ci.token`) | 파이프라인 | 임의 deployer 명의로 check/request **(승인·거부는 불가)** |
+
+CI 서비스 토큰이 승인 투표를 할 수 없는 것이 핵심입니다 — 파이프라인 시크릿이 유출돼도
+운영 스택 배포를 스스로 승인할 수 없습니다. 여기에 더해 **요청자 본인은 자기 요청을 승인할 수
+없습니다**(4-eyes). 토큰은 SHA-256 해시로만 저장되며 평문은 보관하지 않습니다.
 
 ## 기술 스택
 
@@ -105,6 +122,7 @@ public class DualApproverPolicy extends ApprovalPolicy { /* claim 확인 후 승
 | 인가 모델 | Claims 기반 (InfraHub 패턴 재사용) |
 | 인프라 대상 | AWS CDK (Java) 로 정의된 스택 |
 | 파이프라인 연동 | GitHub Actions |
+| 인증 | Bearer API 토큰 (SHA-256 해시 저장, Spring Security) |
 | 헬스체크/모니터링 | Spring Boot Actuator (health, info, metrics, readiness probe) |
 | DB | SQLite (파일 기반 영속화, 별도 DB 서버 없이 단일 인스턴스로 운영) |
 | 관리 화면 | React + TypeScript + Vite (조회 전용, `frontend/`) |
@@ -121,6 +139,7 @@ deploy-gate/
 │   ├── controller/   # /approval/* 컨트롤러
 │   ├── dto/          # 요청/응답 record
 │   ├── validation/   # 커스텀 예외 + GlobalExceptionHandler
+│   ├── security/     # 토큰 인증 필터 + Spring Security 설정
 │   └── config/       # DemoDataSeeder 등 초기 설정
 ├── src/main/resources/application.yml   # SQLite + Actuator 설정
 ├── src/test/resources/application.yml   # 테스트 전용 H2 인메모리 설정(컨텍스트별 격리)
@@ -147,6 +166,7 @@ deploy-gate/
 ### P3 — 확장
 - ✅ Actuator 기반 헬스체크 및 운영 모니터링 연동 (health/info/metrics), SQLite 영속화
 - ✅ 정책/claim 현황을 확인할 수 있는 관리 화면 (`frontend/`, React + TS) — 조회 전용으로 구현, 화면에서의 정책 수정(CRUD)은 미지원
+- ✅ Bearer 토큰 인증 및 4-eyes(자기 승인 차단) 적용
 - 다른 CDK 스택/멀티 프로젝트로 확장 가능한 범용 라이브러리화 검토 — 보류
 
 ## 왜 이 프로젝트인가

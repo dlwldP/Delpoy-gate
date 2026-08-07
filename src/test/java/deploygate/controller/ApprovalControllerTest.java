@@ -1,9 +1,9 @@
 package deploygate.controller;
 
+import deploygate.config.DemoDataSeeder;
 import deploygate.dto.ApprovalActionResponse;
 import deploygate.dto.ApprovalCheckRequest;
 import deploygate.dto.ApprovalCheckResponse;
-import deploygate.dto.ApprovalDecisionRequest;
 import deploygate.dto.ApprovalHistoryEntry;
 import deploygate.dto.ApprovalRequestCreateRequest;
 import deploygate.dto.ApprovalRequestResponse;
@@ -11,7 +11,11 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -19,15 +23,96 @@ import static org.assertj.core.api.Assertions.assertThat;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class ApprovalControllerTest {
 
+    private static final String CI_TOKEN = "test-ci-service-token";
+
     @Autowired
     private TestRestTemplate restTemplate;
 
+    private static HttpHeaders headers(String token) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setBearerAuth(token);
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        return headers;
+    }
+
+    private <T> ResponseEntity<T> post(String path, String token, Object body, Class<T> responseType) {
+        return restTemplate.exchange(path, HttpMethod.POST, new HttpEntity<>(body, headers(token)), responseType);
+    }
+
+    private <T> ResponseEntity<T> postNoBody(String path, String token, Class<T> responseType) {
+        return restTemplate.exchange(path, HttpMethod.POST, new HttpEntity<>(headers(token)), responseType);
+    }
+
+    private <T> ResponseEntity<T> get(String path, String token, Class<T> responseType) {
+        return restTemplate.exchange(path, HttpMethod.GET, new HttpEntity<>(headers(token)), responseType);
+    }
+
+    /** Creates a fresh pending request as jiye via the CI token. */
+    private ApprovalRequestResponse createRequest(String stack, String action) {
+        return post("/approval/request", CI_TOKEN,
+                new ApprovalRequestCreateRequest("jiye", stack, action), ApprovalRequestResponse.class).getBody();
+    }
+
+    // --- authentication / authorization ---------------------------------------
+
+    @Test
+    void rejectsRequestWithoutToken() {
+        ResponseEntity<String> response = restTemplate.postForEntity("/approval/check",
+                new ApprovalCheckRequest("jiye", "SmallAppStack", "DEPLOY"), String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    }
+
+    @Test
+    void rejectsUnknownToken() {
+        ResponseEntity<String> response = post("/approval/check", "dgt_not_a_real_token",
+                new ApprovalCheckRequest("jiye", "SmallAppStack", "DEPLOY"), String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    }
+
+    @Test
+    void ciServiceTokenCannotCastApprovalVote() {
+        ApprovalRequestResponse created = createRequest("ProdAlbStack", "DEPLOY_CI_VOTE");
+
+        ResponseEntity<String> response = postNoBody("/approval/" + created.id() + "/approve", CI_TOKEN, String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+    }
+
+    @Test
+    void personalTokenCannotActOnBehalfOfAnotherDeployer() {
+        ResponseEntity<String> response = post("/approval/check", DemoDataSeeder.ALICE_TOKEN,
+                new ApprovalCheckRequest("jiye", "SmallAppStack", "DEPLOY"), String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+    }
+
+    @Test
+    void deployerCannotApproveTheirOwnRequest() {
+        // jiye holds ProdAlbStack:deploy but must not be able to wave through their own deploy.
+        ApprovalRequestResponse created = createRequest("ProdAlbStack", "DEPLOY_SELF");
+
+        ResponseEntity<String> response =
+                postNoBody("/approval/" + created.id() + "/approve", DemoDataSeeder.JIYE_TOKEN, String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+    }
+
+    @Test
+    void historyRequiresAdminReadClaim() {
+        // bob authenticates fine but holds no admin:read claim.
+        ResponseEntity<String> response = get("/approval/history", DemoDataSeeder.BOB_TOKEN, String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+    }
+
+    // --- decision flow ---------------------------------------------------------
+
     @Test
     void allowsSmallAppStackDeployForJiye() {
-        ApprovalCheckRequest request = new ApprovalCheckRequest("jiye", "SmallAppStack", "DEPLOY");
-
-        ResponseEntity<ApprovalCheckResponse> response =
-                restTemplate.postForEntity("/approval/check", request, ApprovalCheckResponse.class);
+        ResponseEntity<ApprovalCheckResponse> response = post("/approval/check", CI_TOKEN,
+                new ApprovalCheckRequest("jiye", "SmallAppStack", "DEPLOY"), ApprovalCheckResponse.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody().result()).isEqualTo("ALLOWED");
@@ -35,10 +120,8 @@ class ApprovalControllerTest {
 
     @Test
     void checkReturnsPendingWhenApprovalRequired() {
-        ApprovalCheckRequest request = new ApprovalCheckRequest("jiye", "ProdAlbStack", "DEPLOY");
-
-        ResponseEntity<ApprovalCheckResponse> response =
-                restTemplate.postForEntity("/approval/check", request, ApprovalCheckResponse.class);
+        ResponseEntity<ApprovalCheckResponse> response = post("/approval/check", CI_TOKEN,
+                new ApprovalCheckRequest("jiye", "ProdAlbStack", "DEPLOY"), ApprovalCheckResponse.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
         assertThat(response.getBody().result()).isEqualTo("PENDING");
@@ -46,37 +129,31 @@ class ApprovalControllerTest {
 
     @Test
     void blocksUnknownDeployer() {
-        ApprovalCheckRequest request = new ApprovalCheckRequest("ghost", "SmallAppStack", "DEPLOY");
-
-        ResponseEntity<ApprovalCheckResponse> response =
-                restTemplate.postForEntity("/approval/check", request, ApprovalCheckResponse.class);
+        ResponseEntity<ApprovalCheckResponse> response = post("/approval/check", CI_TOKEN,
+                new ApprovalCheckRequest("ghost", "SmallAppStack", "DEPLOY"), ApprovalCheckResponse.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
     }
 
     @Test
     void blocksUnknownStack() {
-        ApprovalCheckRequest request = new ApprovalCheckRequest("jiye", "UnknownStack", "DEPLOY");
-
-        ResponseEntity<ApprovalCheckResponse> response =
-                restTemplate.postForEntity("/approval/check", request, ApprovalCheckResponse.class);
+        ResponseEntity<ApprovalCheckResponse> response = post("/approval/check", CI_TOKEN,
+                new ApprovalCheckRequest("jiye", "UnknownStack", "DEPLOY"), ApprovalCheckResponse.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
     }
 
     @Test
     void singleApprover_fullFlow_requestApproveRecheckReturns200() {
-        ApprovalRequestResponse created = restTemplate.postForEntity("/approval/request",
-                new ApprovalRequestCreateRequest("jiye", "StagingApiStack", "DEPLOY_S1"),
-                ApprovalRequestResponse.class).getBody();
+        ApprovalRequestResponse created = createRequest("StagingApiStack", "DEPLOY_S1");
         assertThat(created.status()).isEqualTo("PENDING");
 
-        ResponseEntity<ApprovalActionResponse> approveResponse = restTemplate.postForEntity(
-                "/approval/" + created.id() + "/approve", new ApprovalDecisionRequest("alice"), ApprovalActionResponse.class);
+        ResponseEntity<ApprovalActionResponse> approveResponse =
+                postNoBody("/approval/" + created.id() + "/approve", DemoDataSeeder.ALICE_TOKEN, ApprovalActionResponse.class);
         assertThat(approveResponse.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(approveResponse.getBody().status()).isEqualTo("APPROVED");
 
-        ResponseEntity<ApprovalCheckResponse> recheck = restTemplate.postForEntity("/approval/check",
+        ResponseEntity<ApprovalCheckResponse> recheck = post("/approval/check", CI_TOKEN,
                 new ApprovalCheckRequest("jiye", "StagingApiStack", "DEPLOY_S1"), ApprovalCheckResponse.class);
         assertThat(recheck.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(recheck.getBody().result()).isEqualTo("ALLOWED");
@@ -84,83 +161,74 @@ class ApprovalControllerTest {
 
     @Test
     void dualApprover_staysPendingAfterOneOfTwoApprovals() {
-        ApprovalRequestResponse created = restTemplate.postForEntity("/approval/request",
-                new ApprovalRequestCreateRequest("jiye", "ProdAlbStack", "DEPLOY_D1"),
-                ApprovalRequestResponse.class).getBody();
+        ApprovalRequestResponse created = createRequest("ProdAlbStack", "DEPLOY_D1");
 
-        ResponseEntity<ApprovalActionResponse> approveResponse = restTemplate.postForEntity(
-                "/approval/" + created.id() + "/approve", new ApprovalDecisionRequest("alice"), ApprovalActionResponse.class);
-        assertThat(approveResponse.getBody().status()).isEqualTo("PENDING");
+        ResponseEntity<ApprovalActionResponse> firstApproval =
+                postNoBody("/approval/" + created.id() + "/approve", DemoDataSeeder.ALICE_TOKEN, ApprovalActionResponse.class);
+        assertThat(firstApproval.getBody().status()).isEqualTo("PENDING");
 
-        ResponseEntity<ApprovalCheckResponse> recheck = restTemplate.postForEntity("/approval/check",
+        ResponseEntity<ApprovalCheckResponse> recheck = post("/approval/check", CI_TOKEN,
                 new ApprovalCheckRequest("jiye", "ProdAlbStack", "DEPLOY_D1"), ApprovalCheckResponse.class);
         assertThat(recheck.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
 
-        ResponseEntity<ApprovalActionResponse> secondApprove = restTemplate.postForEntity(
-                "/approval/" + created.id() + "/approve", new ApprovalDecisionRequest("bob"), ApprovalActionResponse.class);
-        assertThat(secondApprove.getBody().status()).isEqualTo("APPROVED");
+        ResponseEntity<ApprovalActionResponse> secondApproval =
+                postNoBody("/approval/" + created.id() + "/approve", DemoDataSeeder.BOB_TOKEN, ApprovalActionResponse.class);
+        assertThat(secondApproval.getBody().status()).isEqualTo("APPROVED");
 
-        ResponseEntity<ApprovalCheckResponse> finalCheck = restTemplate.postForEntity("/approval/check",
+        ResponseEntity<ApprovalCheckResponse> finalCheck = post("/approval/check", CI_TOKEN,
                 new ApprovalCheckRequest("jiye", "ProdAlbStack", "DEPLOY_D1"), ApprovalCheckResponse.class);
         assertThat(finalCheck.getStatusCode()).isEqualTo(HttpStatus.OK);
     }
 
     @Test
     void reject_immediatelyDeniesRecheck() {
-        ApprovalRequestResponse created = restTemplate.postForEntity("/approval/request",
-                new ApprovalRequestCreateRequest("jiye", "ProdAlbStack", "DEPLOY_D2"),
-                ApprovalRequestResponse.class).getBody();
+        ApprovalRequestResponse created = createRequest("ProdAlbStack", "DEPLOY_D2");
 
-        ResponseEntity<ApprovalActionResponse> rejectResponse = restTemplate.postForEntity(
-                "/approval/" + created.id() + "/reject", new ApprovalDecisionRequest("alice"), ApprovalActionResponse.class);
+        ResponseEntity<ApprovalActionResponse> rejectResponse =
+                postNoBody("/approval/" + created.id() + "/reject", DemoDataSeeder.ALICE_TOKEN, ApprovalActionResponse.class);
         assertThat(rejectResponse.getBody().status()).isEqualTo("REJECTED");
 
-        ResponseEntity<ApprovalCheckResponse> recheck = restTemplate.postForEntity("/approval/check",
+        ResponseEntity<ApprovalCheckResponse> recheck = post("/approval/check", CI_TOKEN,
                 new ApprovalCheckRequest("jiye", "ProdAlbStack", "DEPLOY_D2"), ApprovalCheckResponse.class);
         assertThat(recheck.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
     }
 
     @Test
     void approve_duplicateVoteReturns409() {
-        ApprovalRequestResponse created = restTemplate.postForEntity("/approval/request",
-                new ApprovalRequestCreateRequest("jiye", "ProdAlbStack", "DEPLOY_D3"),
-                ApprovalRequestResponse.class).getBody();
+        ApprovalRequestResponse created = createRequest("ProdAlbStack", "DEPLOY_D3");
 
-        restTemplate.postForEntity("/approval/" + created.id() + "/approve",
-                new ApprovalDecisionRequest("alice"), ApprovalActionResponse.class);
-        ResponseEntity<String> duplicate = restTemplate.postForEntity("/approval/" + created.id() + "/approve",
-                new ApprovalDecisionRequest("alice"), String.class);
+        postNoBody("/approval/" + created.id() + "/approve", DemoDataSeeder.ALICE_TOKEN, ApprovalActionResponse.class);
+        ResponseEntity<String> duplicate =
+                postNoBody("/approval/" + created.id() + "/approve", DemoDataSeeder.ALICE_TOKEN, String.class);
 
         assertThat(duplicate.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
     }
 
     @Test
     void approve_unknownRequestIdReturns404() {
-        ResponseEntity<String> response = restTemplate.postForEntity("/approval/999999/approve",
-                new ApprovalDecisionRequest("alice"), String.class);
+        ResponseEntity<String> response = postNoBody("/approval/999999/approve", DemoDataSeeder.ALICE_TOKEN, String.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
     }
 
     @Test
-    void approve_unauthorizedApproverReturns403() {
-        ApprovalRequestResponse created = restTemplate.postForEntity("/approval/request",
-                new ApprovalRequestCreateRequest("jiye", "ProdAlbStack", "DEPLOY_D4"),
-                ApprovalRequestResponse.class).getBody();
+    void approve_approverWithoutStackApproveClaimReturns403() {
+        // bob may approve ProdAlbStack but holds no StagingApiStack:approve claim.
+        ApprovalRequestResponse created = createRequest("StagingApiStack", "DEPLOY_S2");
 
-        ResponseEntity<String> response = restTemplate.postForEntity("/approval/" + created.id() + "/approve",
-                new ApprovalDecisionRequest("jiye"), String.class);
+        ResponseEntity<String> response =
+                postNoBody("/approval/" + created.id() + "/approve", DemoDataSeeder.BOB_TOKEN, String.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
     }
 
     @Test
     void historyEndpointReturnsEntriesFilteredByStack() {
-        restTemplate.postForEntity("/approval/check",
+        post("/approval/check", CI_TOKEN,
                 new ApprovalCheckRequest("jiye", "SmallAppStack", "DEPLOY"), ApprovalCheckResponse.class);
 
         ResponseEntity<ApprovalHistoryEntry[]> response =
-                restTemplate.getForEntity("/approval/history?stack=SmallAppStack", ApprovalHistoryEntry[].class);
+                get("/approval/history?stack=SmallAppStack", DemoDataSeeder.JIYE_TOKEN, ApprovalHistoryEntry[].class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody()).isNotEmpty();
