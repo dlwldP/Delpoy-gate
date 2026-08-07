@@ -94,6 +94,8 @@ public class DualApproverPolicy extends ApprovalPolicy { /* claim 확인 후 승
 | `POST /approval/{id}/approve` | 승인권자가 대기 중인 요청 승인 |
 | `POST /approval/{id}/reject` | 승인권자가 대기 중인 요청 거부 |
 | `GET /approval/history` | 감사 로그 조회 (누가 언제 무엇을 승인/거부했는지) |
+| `GET /admin/deployers` | 등록된 deployer와 보유 claim 조회 (관리 화면용, 읽기 전용) |
+| `GET /admin/stack-policies` | 스택별 정책(필요 claim, 승인 레벨) 조회 (관리 화면용, 읽기 전용) |
 
 ## 기술 스택
 
@@ -103,8 +105,9 @@ public class DualApproverPolicy extends ApprovalPolicy { /* claim 확인 후 승
 | 인가 모델 | Claims 기반 (InfraHub 패턴 재사용) |
 | 인프라 대상 | AWS CDK (Java) 로 정의된 스택 |
 | 파이프라인 연동 | GitHub Actions |
-| 헬스체크/모니터링 | Spring Boot Actuator (health, info, metrics) |
+| 헬스체크/모니터링 | Spring Boot Actuator (health, info, metrics, readiness probe) |
 | DB | SQLite (파일 기반 영속화, 별도 DB 서버 없이 단일 인스턴스로 운영) |
+| 관리 화면 | React + TypeScript + Vite (조회 전용, `frontend/`) |
 
 ## 프로젝트 구조
 
@@ -121,6 +124,7 @@ deploy-gate/
 │   └── config/       # DemoDataSeeder 등 초기 설정
 ├── src/main/resources/application.yml   # SQLite + Actuator 설정
 ├── src/test/resources/application.yml   # 테스트 전용 H2 인메모리 설정(컨텍스트별 격리)
+├── frontend/             # 조회 전용 관리 화면 (React + TS + Vite) — 자세한 내용은 frontend/README.md
 └── .github/workflows/    # deploy-gate 자체 CI(build.yml) + 연동 예시 워크플로우(deploy-example.yml)
 ```
 
@@ -142,7 +146,7 @@ deploy-gate/
 
 ### P3 — 확장
 - ✅ Actuator 기반 헬스체크 및 운영 모니터링 연동 (health/info/metrics), SQLite 영속화
-- 정책 테이블을 코드 변경 없이 관리할 수 있는 간단한 관리 화면(옵션) — 보류
+- ✅ 정책/claim 현황을 확인할 수 있는 관리 화면 (`frontend/`, React + TS) — 조회 전용으로 구현, 화면에서의 정책 수정(CRUD)은 미지원
 - 다른 CDK 스택/멀티 프로젝트로 확장 가능한 범용 라이브러리화 검토 — 보류
 
 ## 왜 이 프로젝트인가

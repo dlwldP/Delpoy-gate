@@ -34,9 +34,15 @@ jobs:
           JAR=$(find build/libs -maxdepth 1 -name '*.jar' ! -name '*-plain.jar' | head -n 1)
           echo "Starting $JAR"
           nohup java -jar "$JAR" > app.log 2>&1 &
-          echo "Waiting for /actuator/health..."
+          # Poll the *readiness* probe, not plain /actuator/health: health only
+          # reports DB connectivity, but DemoDataSeeder (a CommandLineRunner)
+          # finishes seeding *after* Tomcat already starts accepting requests.
+          # Readiness only flips UP once all CommandLineRunners have completed,
+          # so this avoids a race where the first request lands before seed
+          # data exists.
+          echo "Waiting for /actuator/health/readiness..."
           for i in $(seq 1 30); do
-            if curl -sf http://localhost:8080/actuator/health | grep -q '"UP"'; then
+            if curl -sf http://localhost:8080/actuator/health/readiness | grep -q '"UP"'; then
               echo "deploy-gate is up"
               exit 0
             fi

@@ -17,6 +17,8 @@ management:
   endpoint:
     health:
       show-details: always
+      probes:
+        enabled: true
   info:
     env:
       enabled: true
