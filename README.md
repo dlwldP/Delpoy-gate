@@ -48,28 +48,42 @@ cdk deploy 워크플로우      승인권자 승인 시
 ```
 deployer
   - id, name
-  - claims: ["stack:SmallAppStack:deploy", "stack:SmallAppStack:destroy"]
+  - claims: ["stack:SmallAppStack:deploy", "stack:ProdAlbStack:approve", ...]
+    # "{action}" 뿐 아니라 승인권자 여부도 "stack:{stack}:approve" claim으로 동일하게 표현
 
 stack_policy
   - stack_name        # 예: "ProdAlbStack"
   - required_claim     # 예: "stack:ProdAlbStack:deploy"
   - approval_level     # NONE / SINGLE_APPROVER / DUAL_APPROVER
 
-approval_log           # 감사 로그
-  - deployer_id, stack_name, action, result, decided_by, decided_at
+approval_request        # 승인 대기 중인 요청 (approval_level > NONE 인 경우에만 생성)
+  - deployer_id, stack_name, action
+  - status              # PENDING / APPROVED / REJECTED
+  - required_approvals  # 생성 시점의 필요 승인 수 스냅샷 (SINGLE=1, DUAL=2)
+  - created_at, decided_at
+
+approval_vote            # approval_request 하나에 대한 승인권자별 투표
+  - request_id, approver_id, decision(APPROVE/REJECT), decided_at
+  - (request_id, approver_id) 유니크 — 동일 승인권자의 중복 투표 방지
+
+approval_log             # 감사 로그 — 모든 실제 결정 시점(즉시 승인/거부, 요청 생성, 투표, 최종 승인/거부)에 기록
+  - deployer_name, stack_name, action, result, decided_by, decided_at, request_id
 ```
 
 정책(`approval_level`)에 따라 승인 절차가 달라지도록, OOP 다형성으로 설계:
 
 ```java
 public abstract class ApprovalPolicy {
-    public abstract ApprovalResult evaluate(Deployer deployer, String stack);
+    public abstract ApprovalLevel getSupportedLevel();
+    public abstract ApprovalResult evaluate(Deployer deployer, StackPolicy stackPolicy);
 }
 
 public class NoApprovalPolicy extends ApprovalPolicy { /* claim만 있으면 즉시 승인 */ }
-public class SingleApproverPolicy extends ApprovalPolicy { /* 승인권자 1인 필요 */ }
-public class DualApproverPolicy extends ApprovalPolicy { /* 승인권자 2인 필요 (운영 스택) */ }
+public class SingleApproverPolicy extends ApprovalPolicy { /* claim 확인 후 승인권자 1인 필요(pending) */ }
+public class DualApproverPolicy extends ApprovalPolicy { /* claim 확인 후 승인권자 2인 필요(pending, 운영 스택) */ }
 ```
+
+정책 자체는 "claim 보유 여부 → 즉시 승인/거부/승인대기(pending)"만 판단하는 순수 함수이고, 승인 대기 요청의 생성·투표 집계·상태 전이는 `ApprovalRequestService`가 담당합니다.
 
 ## API
 
@@ -80,6 +94,8 @@ public class DualApproverPolicy extends ApprovalPolicy { /* 승인권자 2인 �
 | `POST /approval/{id}/approve` | 승인권자가 대기 중인 요청 승인 |
 | `POST /approval/{id}/reject` | 승인권자가 대기 중인 요청 거부 |
 | `GET /approval/history` | 감사 로그 조회 (누가 언제 무엇을 승인/거부했는지) |
+| `GET /admin/deployers` | 등록된 deployer와 보유 claim 조회 (관리 화면용, 읽기 전용) |
+| `GET /admin/stack-policies` | 스택별 정책(필요 claim, 승인 레벨) 조회 (관리 화면용, 읽기 전용) |
 
 ## 기술 스택
 
@@ -89,40 +105,49 @@ public class DualApproverPolicy extends ApprovalPolicy { /* 승인권자 2인 �
 | 인가 모델 | Claims 기반 (InfraHub 패턴 재사용) |
 | 인프라 대상 | AWS CDK (Java) 로 정의된 스택 |
 | 파이프라인 연동 | GitHub Actions |
-| 헬스체크 | Spring Boot Actuator |
-| DB | (검토 중 — 소규모 정책 테이블이라 PostgreSQL 또는 SQLite로 시작 가능) |
+| 헬스체크/모니터링 | Spring Boot Actuator (health, info, metrics, readiness probe) |
+| DB | SQLite (파일 기반 영속화, 별도 DB 서버 없이 단일 인스턴스로 운영) |
+| 관리 화면 | React + TypeScript + Vite (조회 전용, `frontend/`) |
 
-## 프로젝트 구조 (예정)
+## 프로젝트 구조
 
 ```
 deploy-gate/
 ├── src/main/java/deploygate/
-│   ├── domain/           # Deployer, StackPolicy, ApprovalLog
-│   ├── policy/           # ApprovalPolicy 및 하위 구현체
-│   ├── api/              # /approval/* 컨트롤러
-│   └── config/           # Claims 인가 설정
-├── .github/workflows/    # deploy-gate 자체 CI + 연동 예시 워크플로우
-└── docs/                 # 정책 설계 문서
+│   ├── entity/       # Deployer, StackPolicy, ApprovalRequest, ApprovalVote, ApprovalLog 등 JPA 엔티티
+│   ├── dao/          # Spring Data JPA 리포지토리
+│   ├── policy/       # ApprovalPolicy 및 하위 구현체(No/Single/DualApproverPolicy)
+│   ├── service/      # ApprovalCheckService, ApprovalRequestService, ApprovalLogService
+│   ├── controller/   # /approval/* 컨트롤러
+│   ├── dto/          # 요청/응답 record
+│   ├── validation/   # 커스텀 예외 + GlobalExceptionHandler
+│   └── config/       # DemoDataSeeder 등 초기 설정
+├── src/main/resources/application.yml   # SQLite + Actuator 설정
+├── src/test/resources/application.yml   # 테스트 전용 H2 인메모리 설정(컨텍스트별 격리)
+├── frontend/             # 조회 전용 관리 화면 (React + TS + Vite) — 자세한 내용은 frontend/README.md
+└── .github/workflows/    # deploy-gate 자체 CI(build.yml) + 연동 예시 워크플로우(deploy-example.yml)
 ```
+
+(최초 설계 시 구상했던 `domain/`·`api/` 패키지명은 구현 과정에서 각각 `entity/`·`controller/`로 정착했습니다.)
 
 ## 상태 및 MVP 범위
 
-🚧 초기 설계 단계
+✅ P1(MVP) · P2 완료, P3 일부 진행 중
 
-### P1 — MVP 핵심
+### P1 — MVP 핵심 ✅
 - `deployer` / `stack_policy` 데이터 모델 및 claim 매칭 로직
 - `POST /approval/check` — 승인 없이 claim 매칭만으로 허용/거부 판단 (`NoApprovalPolicy`만 지원)
 - GitHub Actions 연동 예시 워크플로우 (`cdk deploy` 전 호출)
 
-### P2 — 2차
+### P2 — 2차 ✅
 - `SingleApproverPolicy`, `DualApproverPolicy` 등 승인 레벨 확장
 - `POST /approval/request` + `approve`/`reject` 승인 대기 흐름
 - `approval_log` 감사 로그 및 `GET /approval/history` 조회 API
 
 ### P3 — 확장
-- Actuator 기반 헬스체크 및 운영 모니터링 연동
-- 정책 테이블을 코드 변경 없이 관리할 수 있는 간단한 관리 화면(옵션)
-- 다른 CDK 스택/멀티 프로젝트로 확장 가능한 범용 라이브러리화 검토
+- ✅ Actuator 기반 헬스체크 및 운영 모니터링 연동 (health/info/metrics), SQLite 영속화
+- ✅ 정책/claim 현황을 확인할 수 있는 관리 화면 (`frontend/`, React + TS) — 조회 전용으로 구현, 화면에서의 정책 수정(CRUD)은 미지원
+- 다른 CDK 스택/멀티 프로젝트로 확장 가능한 범용 라이브러리화 검토 — 보류
 
 ## 왜 이 프로젝트인가
 

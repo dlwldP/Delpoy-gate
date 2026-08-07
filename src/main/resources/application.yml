@@ -1,0 +1,29 @@
+spring:
+  application:
+    name: deploy-gate
+  datasource:
+    url: jdbc:sqlite:${DEPLOY_GATE_DB_PATH:./deploygate.db}
+    driver-class-name: org.sqlite.JDBC
+  jpa:
+    database-platform: org.hibernate.community.dialect.SQLiteDialect
+    hibernate:
+      ddl-auto: update
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: deploy-gate
+    description: claims 기반 배포 승인 게이트
